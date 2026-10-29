@@ -758,7 +758,7 @@ export default function App() {
           department: formData.department || 'Enterprise Verification Core',
           clearanceLevel: 'Authorized',
           expiryDate: '2030-12-31',
-          avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
+          avatarUrl: formData.avatarUrl || formData.gatewayUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
         }
       };
 

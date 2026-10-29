@@ -1,11 +1,17 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   PlusCircle,
   Eye,
   Sparkles,
-  Lock
+  Lock,
+  UploadCloud,
+  FileText,
+  CheckCircle2,
+  X,
+  AlertCircle
 } from 'lucide-react';
 import DigitalIdCard from './DigitalIdCard';
+import { uploadAssetPipeline } from '../services/ipfsService';
 
 export default function MintAssetView({
   onMintAsset,
@@ -13,40 +19,140 @@ export default function MintAssetView({
   account: _account = '',
   userRole = 'admin'
 }) {
-  // Clean blank form state with zero pre-filled junk data
+  // Clean blank form state
   const [formData, setFormData] = useState({
     recipient: '',
     name: '',
     type: 'Identity Document',
-    uri: '',
     department: ''
   });
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!formData.recipient.trim() || !formData.name.trim() || !formData.uri.trim()) return;
-    onMintAsset(formData);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [filePreview, setFilePreview] = useState(null);
+  const [isUploadingIPFS, setIsUploadingIPFS] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [pinnedMetadataUri, setPinnedMetadataUri] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const handleFileSelect = (file) => {
+    if (!file) return;
+    setErrorMsg('');
+    setPinnedMetadataUri('');
+
+    // Check size limit: 25MB
+    if (file.size > 25 * 1024 * 1024) {
+      setErrorMsg('File size exceeds 25MB limit. Please upload a smaller credential artifact.');
+      return;
+    }
+
+    setSelectedFile(file);
+
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => setFilePreview(reader.result);
+      reader.readAsDataURL(file);
+    } else {
+      setFilePreview(null);
+    }
   };
 
-  // Construct a preview asset object reflecting currently typed parameters
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFileSelect(file);
+  };
+
+  const handleRemoveFile = () => {
+    setSelectedFile(null);
+    setFilePreview(null);
+    setPinnedMetadataUri('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setErrorMsg('');
+
+    if (!formData.recipient.trim() || !formData.name.trim()) {
+      setErrorMsg('Recipient wallet address and credential title are required.');
+      return;
+    }
+
+    if (!selectedFile && !pinnedMetadataUri) {
+      setErrorMsg('Please upload a credential document or ID artifact to pin to IPFS.');
+      return;
+    }
+
+    try {
+      let metadataUri = pinnedMetadataUri;
+      let gatewayUrl = '';
+
+      if (!metadataUri && selectedFile) {
+        setIsUploadingIPFS(true);
+        setUploadStatus('Hashing & uploading document to Pinata IPFS...');
+
+        const pipelineResult = await uploadAssetPipeline(selectedFile, {
+          name: formData.name.trim(),
+          type: formData.type,
+          department: formData.department.trim(),
+          recipient: formData.recipient.trim()
+        });
+
+        metadataUri = pipelineResult.metadataUri;
+        gatewayUrl = pipelineResult.gatewayUrl;
+        setPinnedMetadataUri(metadataUri);
+        setUploadStatus('IPFS pinning complete! Initiating blockchain transaction...');
+      }
+
+      onMintAsset({
+        ...formData,
+        uri: metadataUri,
+        gatewayUrl: gatewayUrl || filePreview,
+        avatarUrl: filePreview
+      });
+    } catch (err) {
+      console.error('IPFS upload pipeline error:', err);
+      setErrorMsg(err.message || 'Failed to pin credential artifact to Pinata IPFS.');
+    } finally {
+      setIsUploadingIPFS(false);
+    }
+  };
+
+  // Construct a preview asset object reflecting currently typed parameters and uploaded image
   const previewAsset = useMemo(() => ({
     tokenId: 'PREVIEW',
     name: formData.name || 'Sample Credential',
     assetType: formData.type || 'Identity Document',
     owner: formData.recipient || '0x0000000000000000000000000000000000000000',
     issuedBy: 'Tech Hunters Smart Contract',
-    createdAt: 1730000000,
+    createdAt: Math.floor(Date.now() / 1000),
     isRevoked: false,
-    uri: formData.uri || 'ipfs://...',
+    uri: pinnedMetadataUri || (selectedFile ? `ipfs://pending-cid-${selectedFile.name}` : 'ipfs://...'),
     details: {
       employeeId: 'TH-VERIFIED-ASSET',
       role: formData.type || 'Enterprise Asset',
       department: formData.department || 'Institutional Verification Core',
       clearanceLevel: 'Authorized',
       expiryDate: '2030-12-31',
-      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
+      avatarUrl: filePreview || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
     }
-  }), [formData]);
+  }), [formData, selectedFile, filePreview, pinnedMetadataUri]);
 
   // Strict role isolation: Standard users cannot mint assets
   if (userRole !== 'admin' && userRole !== 'manager') {
@@ -62,6 +168,8 @@ export default function MintAssetView({
       </div>
     );
   }
+
+  const isFormBusy = loading || isUploadingIPFS;
 
   return (
     <div className="space-y-6">
@@ -96,7 +204,7 @@ export default function MintAssetView({
         <div className="lg:col-span-7 rounded-2xl bg-gray-900/60 border border-gray-800 p-6 sm:p-8 backdrop-blur-xl shadow-2xl">
           <h2 className="text-lg font-bold text-white mb-1">Asset Parameters & On-Chain Metadata</h2>
           <p className="text-xs text-gray-400 mb-6">
-            Enter the verified asset details below. Submitting will prompt your Web3 wallet to sign the minting transaction.
+            Upload the verified credential artifact and enter the asset details. Submitting will pin metadata to IPFS and prompt your Web3 wallet for transaction signature.
           </p>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -110,8 +218,9 @@ export default function MintAssetView({
                 placeholder="0xB7c3A398e8e9eD1Bd1aFC6832f02b1A11c2d4677"
                 value={formData.recipient}
                 onChange={(e) => setFormData({ ...formData, recipient: e.target.value.trim() })}
+                disabled={isFormBusy}
                 required
-                className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs font-mono focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-50"
               />
             </div>
 
@@ -126,8 +235,9 @@ export default function MintAssetView({
                   placeholder="e.g. Executive Credential Pass"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  disabled={isFormBusy}
                   required
-                  className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs focus:outline-none focus:border-indigo-500"
+                  className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50"
                 />
               </div>
 
@@ -138,7 +248,8 @@ export default function MintAssetView({
                 <select
                   value={formData.type}
                   onChange={(e) => setFormData({ ...formData, type: e.target.value })}
-                  className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white text-xs focus:outline-none focus:border-indigo-500 cursor-pointer"
+                  disabled={isFormBusy}
+                  className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white text-xs focus:outline-none focus:border-indigo-500 cursor-pointer disabled:opacity-50"
                 >
                   <option value="Identity Document">Identity Document</option>
                   <option value="Digital Credential">Digital Credential</option>
@@ -149,19 +260,105 @@ export default function MintAssetView({
               </div>
             </div>
 
-            {/* IPFS Decentralized Metadata URI */}
+            {/* Automated Document Attachment & IPFS Pinning Dropzone */}
             <div>
-              <label className="block text-xs font-semibold text-gray-300 mb-1.5">
-                Decentralized Metadata URI (ipfs://...) *
+              <label className="block text-xs font-semibold text-gray-300 mb-1.5 flex items-center justify-between">
+                <span>Credential Document / Identity Artifact *</span>
+                <span className="text-[10px] font-mono text-cyan-400">Automated Pinata IPFS Pinning</span>
               </label>
+
               <input
-                type="text"
-                placeholder="ipfs://bafybeiczsscdsbs7ffqz55asqdf3efuylqabf3oclgtqy55fbzdik98a12/metadata.json"
-                value={formData.uri}
-                onChange={(e) => setFormData({ ...formData, uri: e.target.value.trim() })}
-                required
-                className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs font-mono focus:outline-none focus:border-indigo-500"
+                type="file"
+                ref={fileInputRef}
+                onChange={(e) => handleFileSelect(e.target.files?.[0])}
+                accept="image/*,application/pdf"
+                className="hidden"
+                id="document-upload"
               />
+
+              {!selectedFile ? (
+                <div
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  onClick={() => !isFormBusy && fileInputRef.current?.click()}
+                  className={`border-2 border-dashed rounded-2xl p-6 flex flex-col items-center justify-center gap-2.5 cursor-pointer transition-all text-center ${
+                    isDragging
+                      ? 'border-cyan-400 bg-cyan-950/20 shadow-lg shadow-cyan-500/10'
+                      : 'border-gray-800 hover:border-indigo-500/60 bg-gray-950/50 hover:bg-gray-950/80'
+                  } ${isFormBusy ? 'opacity-50 pointer-events-none' : ''}`}
+                >
+                  <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-cyan-400">
+                    <UploadCloud className="w-6 h-6 animate-pulse" />
+                  </div>
+                  <div>
+                    <p className="text-xs sm:text-sm font-bold text-white">
+                      Click to upload or drag & drop credential document
+                    </p>
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Supports PDF credentials, institutional badges, PNG, JPG, or SVG (Max 25MB)
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+                      Decentralized IPFS Pinning
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                      CIDv1 SHA-256
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 rounded-2xl bg-gray-950/80 border border-indigo-900/40 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3.5 overflow-hidden">
+                      {filePreview ? (
+                        <img
+                          src={filePreview}
+                          alt="Preview"
+                          className="w-12 h-12 rounded-xl object-cover border border-indigo-500/40 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-12 h-12 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-cyan-400 flex items-center justify-center shrink-0">
+                          <FileText className="w-6 h-6" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-white truncate max-w-[280px]">
+                          {selectedFile.name}
+                        </p>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-[11px] font-mono text-gray-400">
+                            {(selectedFile.size / 1024).toFixed(1)} KB
+                          </span>
+                          <span className="text-gray-600">•</span>
+                          <span className="text-[10px] font-mono font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" /> Ready for IPFS
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRemoveFile}
+                      disabled={isFormBusy}
+                      className="p-2 text-gray-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                      title="Remove file"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {pinnedMetadataUri && (
+                    <div className="pt-2 border-t border-gray-800/80 flex items-center justify-between text-[11px] font-mono">
+                      <span className="text-gray-400">Pinned Metadata URI:</span>
+                      <span className="text-cyan-400 truncate max-w-[320px] font-bold">
+                        {pinnedMetadataUri}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Department */}
@@ -174,18 +371,39 @@ export default function MintAssetView({
                 placeholder="e.g. Decentralized Infrastructure & Security"
                 value={formData.department}
                 onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs focus:outline-none focus:border-indigo-500"
+                disabled={isFormBusy}
+                className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50"
               />
             </div>
+
+            {/* Realtime Upload / Error Feedback */}
+            {isUploadingIPFS && (
+              <div className="p-3 rounded-xl bg-cyan-950/30 border border-cyan-800/50 flex items-center gap-2.5 text-xs text-cyan-300">
+                <div className="w-3.5 h-3.5 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin shrink-0" />
+                <span>{uploadStatus}</span>
+              </div>
+            )}
+
+            {errorMsg && (
+              <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-800/50 flex items-center gap-2 text-xs text-rose-300">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
 
             {/* Submit Button */}
             <div className="pt-4">
               <button
                 type="submit"
-                disabled={loading}
+                disabled={isFormBusy}
                 className="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white font-bold text-xs tracking-wider uppercase shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50"
               >
-                {loading ? (
+                {isUploadingIPFS ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                    Pinning Document & Metadata to IPFS...
+                  </>
+                ) : loading ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
                     Broadcasting Transaction to Ethereum...
@@ -193,7 +411,7 @@ export default function MintAssetView({
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4" />
-                    Mint Digital Asset On-Chain
+                    Pin to IPFS & Mint Digital Asset
                   </>
                 )}
               </button>
