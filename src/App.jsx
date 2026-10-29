@@ -1,7 +1,15 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ethers } from 'ethers';
-import { CONTRACT_ADDRESS, CONTRACT_ABI } from './constants/contract';
-import { INITIAL_ASSETS, INITIAL_AUDIT_LOGS, INITIAL_MANAGERS } from './constants/initialData';
+import {
+  CONTRACT_ADDRESS,
+  CONTRACT_ABI,
+  DEFAULT_ADMIN_ROLE,
+  MANAGER_ROLE,
+  MASTER_ADMIN_ADDRESS,
+  KNOWN_SEPOLIA_MANAGERS,
+  getSepoliaContract
+} from './constants/contract';
+import { INITIAL_ASSETS, INITIAL_AUDIT_LOGS } from './constants/initialData';
 import SparklesCore from './components/SparklesCore';
 import WalletHeader from './components/WalletHeader';
 import Sidebar from './components/Sidebar';
@@ -30,12 +38,14 @@ import {
   ShieldCheck
 } from 'lucide-react';
 
+const VALID_TABS = ['dashboard', 'mint', 'roles', 'directory', 'track-records', 'settings', '404'];
+
 export default function App() {
   // 2. SESSION PERSISTENCE & NO REFRESH REDIRECTS:
-  // Synchronously initialize state from localStorage to eliminate any flashing or redirection on refresh
+  // Synchronously initialize state from localStorage / sessionStorage to eliminate any flashing or redirection on refresh
   const [account, setAccount] = useState(() => {
     try {
-      const saved = localStorage.getItem('techhunters_session');
+      const saved = localStorage.getItem('techhunters_session') || sessionStorage.getItem('techhunters_session');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && parsed.account) return parsed.account;
@@ -43,12 +53,12 @@ export default function App() {
     } catch {
       // Fallback
     }
-    return '';
+    return null;
   });
 
   const [currentView, setCurrentView] = useState(() => {
     try {
-      const saved = localStorage.getItem('techhunters_session');
+      const saved = localStorage.getItem('techhunters_session') || sessionStorage.getItem('techhunters_session');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && parsed.account) return 'dashboard';
@@ -61,7 +71,7 @@ export default function App() {
 
   const [userRole, setUserRole] = useState(() => {
     try {
-      const saved = localStorage.getItem('techhunters_session');
+      const saved = localStorage.getItem('techhunters_session') || sessionStorage.getItem('techhunters_session');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && parsed.role) return parsed.role;
@@ -80,15 +90,62 @@ export default function App() {
 
   // Role permissions
   const [_isAdmin, setIsAdmin] = useState(() => userRole === 'admin');
-  const [isManager, setIsManager] = useState(() => userRole === 'admin' || userRole === 'manager');
+  const [_isManager, setIsManager] = useState(() => userRole === 'admin' || userRole === 'manager');
 
   // 4. CLEAN SLATE STATE: Zero mock data, starts completely empty
   const [assets, setAssets] = useState(INITIAL_ASSETS);
   const [auditLogs, setAuditLogs] = useState(INITIAL_AUDIT_LOGS);
-  const [managers, setManagers] = useState(INITIAL_MANAGERS);
+  const [managers, setManagers] = useState(() => {
+    try {
+      const saved = localStorage.getItem('techhunters_session') || sessionStorage.getItem('techhunters_session');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.account && parsed.role === 'manager') {
+          return [{
+            address: parsed.account,
+            status: 'Active',
+            assignedDate: new Date().toISOString(),
+            name: 'Operational Manager (You)'
+          }];
+        }
+      }
+    } catch {
+      // Fallback
+    }
+    return KNOWN_SEPOLIA_MANAGERS.map(addr => ({
+      address: ethers.utils.getAddress(addr),
+      status: 'Active',
+      assignedDate: '2026-10-29T00:00:00.000Z',
+      name: 'Operational Manager'
+    }));
+  });
 
-  // View Navigation
-  const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'mint' | 'roles' | 'track-records' | 'settings' | '404'
+  // Ref tracking managers for callbacks without trigger cascades
+  const managersRef = useRef(managers);
+  useEffect(() => {
+    managersRef.current = managers;
+  }, [managers]);
+
+  // View Navigation with Full Refresh & URL Hash Persistence
+  const [activeTab, setActiveTab] = useState(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        // 1. Check URL Hash first (e.g. #directory, #track-records)
+        const hash = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase();
+        if (hash && VALID_TABS.includes(hash)) {
+          return hash;
+        }
+        // 2. Check localStorage or sessionStorage
+        const savedTab = localStorage.getItem('techhunters_active_tab') || sessionStorage.getItem('techhunters_active_tab');
+        if (savedTab && VALID_TABS.includes(savedTab)) {
+          return savedTab;
+        }
+      } catch {
+        // Fallback
+      }
+    }
+    return 'dashboard';
+  });
   const [selectedAsset, setSelectedAsset] = useState(null);
   const [fullscreenAsset, setFullscreenAsset] = useState(null);
   const [verifyingAsset, setVerifyingAsset] = useState(null);
@@ -116,51 +173,97 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // Role Checker directly from smart contract state
+  // Role Checker directly from smart contract state using Ethers.js
   const checkUserRoles = useCallback(async (currContract, userAddress) => {
-    try {
-      if (currContract) {
-        const adminRoleBytes = await currContract.DEFAULT_ADMIN_ROLE();
-        const managerRoleBytes = await currContract.MANAGER_ROLE();
-
-        const [adminCheck, managerCheck] = await Promise.all([
-          currContract.hasRole(adminRoleBytes, userAddress),
-          currContract.hasRole(managerRoleBytes, userAddress)
-        ]);
-
-        setIsAdmin(adminCheck);
-        setIsManager(adminCheck || managerCheck);
-
-        let detectedRole = 'user';
-        if (adminCheck) detectedRole = 'admin';
-        else if (managerCheck) detectedRole = 'manager';
-
-        setUserRole(detectedRole);
-        return detectedRole;
-      }
-    } catch (err) {
-      console.warn("Could not query roles from contract; checking roster:", err);
+    if (!userAddress || !ethers.utils.isAddress(userAddress)) {
+      setUserRole('user');
+      setIsAdmin(false);
+      setIsManager(false);
+      return 'user';
     }
 
-    // Fallback check against known admin or manager
-    const isKnownAdmin = userAddress.toLowerCase() === CONTRACT_ADDRESS.toLowerCase() ||
-      userAddress.toLowerCase() === '0x71b2b54e8972d7a4b8682f81bcec6e7118334b7d'.toLowerCase();
+    const normalizedAddr = ethers.utils.getAddress(userAddress);
+    let adminCheck = false;
+    let managerCheck = false;
 
-    let detectedRole = 'user';
-    if (isKnownAdmin) detectedRole = 'admin';
+    // 1. Try querying Sepolia contract using Ethers.js via active Web3Provider (MetaMask)
+    if (currContract) {
+      try {
+        const [adminRoleBytes, managerRoleBytes] = await Promise.all([
+          currContract.DEFAULT_ADMIN_ROLE().catch(() => DEFAULT_ADMIN_ROLE),
+          currContract.MANAGER_ROLE().catch(() => MANAGER_ROLE)
+        ]);
 
-    setIsAdmin(detectedRole === 'admin');
-    setIsManager(detectedRole === 'admin' || detectedRole === 'manager');
+        const [isAdminOnChain, isManagerOnChain] = await Promise.all([
+          currContract.hasRole(adminRoleBytes, normalizedAddr),
+          currContract.hasRole(managerRoleBytes, normalizedAddr)
+        ]);
+
+        adminCheck = Boolean(isAdminOnChain);
+        managerCheck = Boolean(isManagerOnChain);
+      } catch (contractErr) {
+        console.warn("Active Web3Provider role check note (attempting Sepolia RPC fallback):", contractErr);
+      }
+    }
+
+    // 2. Resilient fallback query directly against Sepolia smart contract
+    if (!adminCheck && !managerCheck) {
+      try {
+        const readContract = getSepoliaContract();
+        const [isAdminOnChain, isManagerOnChain] = await Promise.all([
+          readContract.hasRole(DEFAULT_ADMIN_ROLE, normalizedAddr),
+          readContract.hasRole(MANAGER_ROLE, normalizedAddr)
+        ]);
+        adminCheck = Boolean(isAdminOnChain);
+        managerCheck = Boolean(isManagerOnChain);
+      } catch (rpcErr) {
+        console.warn("Sepolia RPC fallback role check error:", rpcErr);
+      }
+    }
+
+    // 3. Fallback check against verified on-chain deployer / manager address
+    if (!adminCheck && !managerCheck) {
+      if (normalizedAddr.toLowerCase() === MASTER_ADMIN_ADDRESS.toLowerCase()) {
+        adminCheck = true;
+      } else if (KNOWN_SEPOLIA_MANAGERS.some(m => m.toLowerCase() === normalizedAddr.toLowerCase())) {
+        managerCheck = true;
+      }
+    }
+
+    const detectedRole = adminCheck ? 'admin' : (managerCheck ? 'manager' : 'user');
+    setIsAdmin(adminCheck);
+    setIsManager(adminCheck || managerCheck);
     setUserRole(detectedRole);
+
+    // If connected wallet possesses MANAGER_ROLE on Sepolia,
+    // dynamically recognize and list it in managers state so System Directory and counters reflect it immediately
+    if (managerCheck) {
+      setManagers(prev => {
+        const alreadyExists = prev.some(m => (m.address || m).toLowerCase() === normalizedAddr.toLowerCase());
+        if (!alreadyExists) {
+          return [
+            {
+              address: normalizedAddr,
+              status: 'Active',
+              assignedDate: new Date().toISOString(),
+              name: 'Operational Manager (You)'
+            },
+            ...prev
+          ];
+        }
+        return prev;
+      });
+    }
+
     return detectedRole;
   }, []);
 
   // Load Assets from Contract
   const loadAllAssets = useCallback(async (currContract) => {
     try {
-      if (!currContract) return;
+      if (!currContract) return [];
       const tokenIds = await currContract.getAllTokenIds();
-      if (!tokenIds || tokenIds.length === 0) return;
+      if (!tokenIds || tokenIds.length === 0) return [];
 
       const loadedAssets = [];
       for (let id of tokenIds) {
@@ -193,8 +296,128 @@ export default function App() {
       if (loadedAssets.length > 0) {
         setAssets(loadedAssets);
       }
+      return loadedAssets;
     } catch (err) {
       console.warn("Contract getAllTokenIds call reverted or empty:", err);
+      return [];
+    }
+  }, []);
+
+  // Real-Time Query of Sepolia smart contract for all accounts possessing MANAGER_ROLE
+  const syncManagersFromChain = useCallback(async (currContract, userAddress, loadedAssets = []) => {
+    try {
+      let contractToQuery = currContract;
+      try {
+        if (contractToQuery) {
+          await contractToQuery.MANAGER_ROLE();
+        } else {
+          contractToQuery = getSepoliaContract();
+        }
+      } catch {
+        contractToQuery = getSepoliaContract();
+      }
+
+      const managerRoleBytes = await contractToQuery.MANAGER_ROLE().catch(() => MANAGER_ROLE);
+
+      // Gather candidate addresses that could hold MANAGER_ROLE
+      const candidates = new Set();
+
+      // 1. Verified on-chain Sepolia managers
+      KNOWN_SEPOLIA_MANAGERS.forEach(m => {
+        if (ethers.utils.isAddress(m)) candidates.add(ethers.utils.getAddress(m));
+      });
+
+      // 2. Connected wallet
+      if (userAddress && ethers.utils.isAddress(userAddress)) {
+        candidates.add(ethers.utils.getAddress(userAddress));
+      }
+
+      // 3. Loaded asset minters
+      loadedAssets.forEach(a => {
+        if (a.issuedBy && ethers.utils.isAddress(a.issuedBy)) {
+          candidates.add(ethers.utils.getAddress(a.issuedBy));
+        }
+      });
+
+      // 4. Managers previously in state
+      (managersRef.current || []).forEach(m => {
+        const addr = m.address || m;
+        if (addr && ethers.utils.isAddress(addr)) {
+          candidates.add(ethers.utils.getAddress(addr));
+        }
+      });
+
+      // 5. Query recent on-chain RoleGranted event logs on Sepolia safely
+      try {
+        const provider = contractToQuery.provider;
+        if (provider) {
+          const currentBlock = await provider.getBlockNumber();
+          const fromBlock = Math.max(0, currentBlock - 2000);
+          const logs = await provider.getLogs({
+            fromBlock,
+            toBlock: 'latest',
+            address: CONTRACT_ADDRESS,
+            topics: [
+              ethers.utils.id("RoleGranted(bytes32,address,address)"),
+              managerRoleBytes
+            ]
+          });
+          logs.forEach(log => {
+            try {
+              const parsed = contractToQuery.interface.parseLog(log);
+              if (parsed.args && parsed.args.account && ethers.utils.isAddress(parsed.args.account)) {
+                candidates.add(ethers.utils.getAddress(parsed.args.account));
+              }
+            } catch { }
+          });
+        }
+      } catch (evErr) {
+        console.warn("Could not query RoleGranted events directly from provider:", evErr);
+      }
+
+      // Query contract.hasRole(MANAGER_ROLE, candidate) on Sepolia for every candidate
+      const activeManagers = [];
+      for (const cand of candidates) {
+        try {
+          const isManagerOnChain = await contractToQuery.hasRole(managerRoleBytes, cand);
+          if (isManagerOnChain) {
+            const isConnectedUser = userAddress && cand.toLowerCase() === userAddress.toLowerCase();
+            activeManagers.push({
+              address: ethers.utils.getAddress(cand),
+              status: 'Active',
+              assignedDate: new Date().toISOString(),
+              name: isConnectedUser ? 'Operational Manager (You)' : 'Operational Manager'
+            });
+          }
+        } catch (checkErr) {
+          console.warn(`Error verifying role for ${cand}:`, checkErr);
+        }
+      }
+
+      // If connected wallet possesses MANAGER_ROLE, guarantee it is included
+      if (userAddress && ethers.utils.isAddress(userAddress)) {
+        const userNorm = ethers.utils.getAddress(userAddress);
+        const isUserMgr = await contractToQuery.hasRole(managerRoleBytes, userNorm).catch(() => false);
+        if (isUserMgr && !activeManagers.some(m => m.address.toLowerCase() === userNorm.toLowerCase())) {
+          activeManagers.unshift({
+            address: userNorm,
+            status: 'Active',
+            assignedDate: new Date().toISOString(),
+            name: 'Operational Manager (You)'
+          });
+        }
+      }
+
+      if (activeManagers.length > 0) {
+        setManagers(prev => {
+          const map = new Map();
+          prev.forEach(m => map.set((m.address || m).toLowerCase(), m));
+          activeManagers.forEach(m => map.set(m.address.toLowerCase(), m));
+          return Array.from(map.values());
+        });
+      }
+    } catch (err) {
+      console.warn("syncManagersFromChain error:", err);
     }
   }, []);
 
@@ -216,12 +439,15 @@ export default function App() {
       setCurrentView('dashboard');
 
       const detectedRole = await checkUserRoles(tempContract, userAddress);
-      await loadAllAssets(tempContract);
+      const loadedAssets = await loadAllAssets(tempContract);
+      await syncManagersFromChain(tempContract, userAddress, loadedAssets || []);
 
-      localStorage.setItem('techhunters_session', JSON.stringify({
+      const sessionData = JSON.stringify({
         account: userAddress,
         role: detectedRole
-      }));
+      });
+      localStorage.setItem('techhunters_session', sessionData);
+      sessionStorage.setItem('techhunters_session', sessionData);
 
       if (isChange) {
         addToast('info', 'Account Switched', `Active wallet updated to ${userAddress.substring(0, 6)}...${userAddress.substring(38)}`);
@@ -231,107 +457,220 @@ export default function App() {
       setAccount(userAddress);
       setCurrentView('dashboard');
       const detected = await checkUserRoles(null, userAddress);
-      localStorage.setItem('techhunters_session', JSON.stringify({
+      const sessionData = JSON.stringify({
         account: userAddress,
         role: detected
-      }));
+      });
+      localStorage.setItem('techhunters_session', sessionData);
+      sessionStorage.setItem('techhunters_session', sessionData);
     }
-  }, [checkUserRoles, loadAllAssets, addToast]);
+  }, [checkUserRoles, loadAllAssets, syncManagersFromChain, addToast]);
 
   // 3. TOP-RIGHT DISCONNECT ONLY: Clean, immediate disconnect
   const handleImmediateDisconnect = useCallback(() => {
-    setAccount('');
+    setAccount(null);
     setProvider(null);
     setSigner(null);
     setContract(null);
-    localStorage.removeItem('techhunters_session');
+    setUserRole('user');
+    setIsAdmin(false);
+    setIsManager(false);
+    setSelectedAsset(null);
+    setFullscreenAsset(null);
+    setVerifyingAsset(null);
+    try {
+      localStorage.removeItem('techhunters_session');
+      sessionStorage.removeItem('techhunters_session');
+      localStorage.removeItem('techhunters_active_tab');
+      sessionStorage.removeItem('techhunters_active_tab');
+      sessionStorage.clear();
+      if (typeof window !== 'undefined' && window.location.hash) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+    } catch (err) {
+      console.warn("Error wiping storage on disconnect:", err);
+    }
     setCurrentView('landing');
     setActiveTab('dashboard');
     addToast('info', 'Wallet Disconnected', 'Session terminated safely.');
   }, [addToast]);
 
+  // Stable references for event listeners and background callbacks
+  const accountRef = useRef(account);
+  useEffect(() => {
+    accountRef.current = account;
+  }, [account]);
+
+  const initMetaMaskRef = useRef(initMetaMask);
+  useEffect(() => {
+    initMetaMaskRef.current = initMetaMask;
+  }, [initMetaMask]);
+
+  const handleImmediateDisconnectRef = useRef(handleImmediateDisconnect);
+  useEffect(() => {
+    handleImmediateDisconnectRef.current = handleImmediateDisconnect;
+  }, [handleImmediateDisconnect]);
+
   // 2. PERSISTENT WEB3 WALLET STATE & REFRESH RESTORATION
+  // Runs strictly once on mount. Never auto-reconnects if the user has logged out or cleared storage.
   useEffect(() => {
     let isMounted = true;
 
     const restoreSession = async () => {
+      const saved = localStorage.getItem('techhunters_session') || sessionStorage.getItem('techhunters_session');
+      if (!saved || !isMounted) {
+        return;
+      }
+
+      let parsed = null;
+      try {
+        parsed = JSON.parse(saved);
+      } catch (e) {
+        console.error("Session restore error:", e);
+        try {
+          localStorage.removeItem('techhunters_session');
+          sessionStorage.removeItem('techhunters_session');
+        } catch { }
+        return;
+      }
+
+      if (!parsed || !parsed.account) {
+        return;
+      }
+
       if (typeof window !== 'undefined' && window.ethereum) {
         try {
           const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-          if (accounts && accounts.length > 0 && isMounted) {
-            await initMetaMask(accounts[0], false);
-            return;
+          if (!isMounted) return;
+
+          if (accounts && accounts.length > 0) {
+            await initMetaMaskRef.current(accounts[0], false);
+          } else {
+            // MetaMask was locked or disconnected on extension side while browser was closed
+            console.warn("MetaMask accounts empty on restore; clearing session.");
+            handleImmediateDisconnectRef.current();
           }
         } catch (err) {
           console.warn("Could not retrieve active eth_accounts:", err);
-        }
-      }
-
-      const saved = localStorage.getItem('techhunters_session');
-      if (saved && isMounted) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (parsed && parsed.account) {
-            setAccount(parsed.account);
-            setUserRole(parsed.role || 'user');
-            setIsAdmin(parsed.role === 'admin');
-            setIsManager(parsed.role === 'admin' || parsed.role === 'manager');
-            setCurrentView('dashboard');
-
-            if (typeof window !== 'undefined' && window.ethereum) {
-              await initMetaMask(parsed.account, false);
-            }
-          }
-        } catch (e) {
-          console.error("Session restore error:", e);
         }
       }
     };
 
     restoreSession();
 
-    // MetaMask Event Listeners
-    if (typeof window !== 'undefined' && window.ethereum) {
-      const handleAccountsChanged = (accounts) => {
-        if (!isMounted) return;
-        if (!accounts || accounts.length === 0) {
-          handleImmediateDisconnect();
-        } else {
-          initMetaMask(accounts[0], true);
-        }
-      };
-
-      const handleChainChanged = () => {
-        window.location.reload();
-      };
-
-      window.ethereum.on('accountsChanged', handleAccountsChanged);
-      window.ethereum.on('chainChanged', handleChainChanged);
-
-      return () => {
-        isMounted = false;
-        if (window.ethereum.removeListener) {
-          window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-          window.ethereum.removeListener('chainChanged', handleChainChanged);
-        }
-      };
-    }
-
     return () => {
       isMounted = false;
     };
-  }, [initMetaMask, handleImmediateDisconnect]);
+  }, []);
+
+  // MetaMask Provider Event Listeners: accountsChanged, chainChanged, and disconnect
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.ethereum) return;
+
+    let isMounted = true;
+
+    const handleAccountsChanged = (accounts) => {
+      if (!isMounted) return;
+      if (!accounts || accounts.length === 0) {
+        // Disconnected or locked from MetaMask extension side
+        handleImmediateDisconnectRef.current();
+      } else {
+        // Only switch account if the user is currently connected to the application
+        const saved = localStorage.getItem('techhunters_session') || sessionStorage.getItem('techhunters_session');
+        if (saved || accountRef.current) {
+          if (!accountRef.current || accounts[0].toLowerCase() !== accountRef.current.toLowerCase()) {
+            initMetaMaskRef.current(accounts[0], true);
+          }
+        }
+      }
+    };
+
+    const handleChainChanged = () => {
+      window.location.reload();
+    };
+
+    const handleDisconnect = (error) => {
+      console.warn("MetaMask provider emitted disconnect:", error);
+      if (!isMounted) return;
+      handleImmediateDisconnectRef.current();
+    };
+
+    window.ethereum.on('accountsChanged', handleAccountsChanged);
+    window.ethereum.on('chainChanged', handleChainChanged);
+    window.ethereum.on('disconnect', handleDisconnect);
+
+    return () => {
+      isMounted = false;
+      const remove = window.ethereum.removeListener || window.ethereum.off;
+      if (typeof remove === 'function') {
+        remove.call(window.ethereum, 'accountsChanged', handleAccountsChanged);
+        remove.call(window.ethereum, 'chainChanged', handleChainChanged);
+        remove.call(window.ethereum, 'disconnect', handleDisconnect);
+      }
+    };
+  }, []);
+
+  // Real-time synchronization of managers directly from Sepolia smart contract
+  useEffect(() => {
+    if (!account) return;
+    let active = true;
+    const syncFromSepolia = async () => {
+      try {
+        const readContract = getSepoliaContract();
+        if (active) {
+          await syncManagersFromChain(readContract, account, assets);
+        }
+      } catch (err) {
+        console.warn("Background Sepolia sync note:", err);
+      }
+    };
+    syncFromSepolia();
+    return () => { active = false; };
+  }, [syncManagersFromChain, account, assets]);
 
   // Strict Role-Isolated Active Tab
   const allowedTabsForRole = useMemo(() => ({
     admin: ['dashboard', 'mint', 'roles', 'directory', 'track-records', 'settings', '404'],
-    manager: ['dashboard', 'mint', 'directory', 'track-records', '404'],
-    user: ['dashboard', 'directory', 'track-records', '404']
+    manager: ['dashboard', 'mint', 'directory', 'track-records', 'settings', '404'],
+    user: ['dashboard', 'track-records', '404']
   }), []);
 
   const effectiveTab = (allowedTabsForRole[userRole] && allowedTabsForRole[userRole].includes(activeTab))
     ? activeTab
     : 'dashboard';
+
+  // Synchronize active dashboard tab to localStorage, sessionStorage, and URL hash
+  useEffect(() => {
+    if (!account || currentView === 'landing') return;
+
+    try {
+      localStorage.setItem('techhunters_active_tab', effectiveTab);
+      sessionStorage.setItem('techhunters_active_tab', effectiveTab);
+    } catch (err) {
+      console.warn("Could not persist active tab to storage:", err);
+    }
+
+    if (typeof window !== 'undefined') {
+      const currentHash = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase();
+      if (currentHash !== effectiveTab) {
+        window.history.replaceState(null, '', `#${effectiveTab}`);
+      }
+    }
+  }, [effectiveTab, account, currentView]);
+
+  // Support browser Back/Forward navigation between dashboard tabs
+  useEffect(() => {
+    const handleHashChange = () => {
+      if (typeof window === 'undefined') return;
+      const hash = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase();
+      if (hash && VALID_TABS.includes(hash)) {
+        setActiveTab(hash);
+      }
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
 
   // Dynamic Document Title
   useEffect(() => {
@@ -372,8 +711,13 @@ export default function App() {
     }
   };
 
-  // 5. Mint Asset Action
+  // 5. Mint Asset Action (Admin & Manager Only)
   const handleMintAsset = async (formData) => {
+    if (userRole !== 'admin' && userRole !== 'manager') {
+      addToast('error', 'Unauthorized Action', 'Only Admin and Manager roles are authorized to mint digital assets.');
+      return;
+    }
+
     try {
       setIsProcessing(true);
       setLoading(true);
@@ -420,12 +764,15 @@ export default function App() {
 
       setAssets(prev => [newAsset, ...prev]);
 
-      // 8. Track Records & Indian Standard Time (IST)
+      // 8. Track Records & Indian Standard Time (IST) - Associated directly with recipient
       const newLog = {
         id: `LOG-00${auditLogs.length + 1}`,
         activity: `Asset Minted: ${formData.name}`,
         details: `Issued Token #${newId} (${formData.type}) to ${formData.recipient}`,
         wallet: account || CONTRACT_ADDRESS,
+        recipient: formData.recipient,
+        targetAddress: formData.recipient,
+        tokenId: newId,
         timestamp: new Date().toISOString(),
         blockNumber: 19827400 + auditLogs.length,
         txHash: txHash,
@@ -444,8 +791,13 @@ export default function App() {
     }
   };
 
-  // Revoke / Reactivate Asset Action
+  // Revoke / Reactivate Asset Action (Admin & Manager Only)
   const handleRevokeAsset = async (tokenId, newRevokedStatus) => {
+    if (userRole !== 'admin' && userRole !== 'manager') {
+      addToast('error', 'Unauthorized Action', 'Only Admin and Manager roles are authorized to revoke or reactivate assets.');
+      return;
+    }
+
     try {
       setIsProcessing(true);
       setRevokingTokenId(tokenId);
@@ -469,11 +821,19 @@ export default function App() {
         setSelectedAsset(prev => ({ ...prev, isRevoked: newRevokedStatus }));
       }
 
+      const targetAsset = assets.find(a => a.tokenId === tokenId);
+      const targetOwner = targetAsset?.owner || '';
+
       const newLog = {
         id: `LOG-00${auditLogs.length + 1}`,
         activity: newRevokedStatus ? `Asset Revoked: Token #${tokenId}` : `Asset Restored: Token #${tokenId}`,
-        details: newRevokedStatus ? `Deactivated credential authorization for Token #${tokenId}` : `Restored validity status for Token #${tokenId}`,
+        details: newRevokedStatus
+          ? `Deactivated credential authorization for Token #${tokenId}${targetOwner ? ` (Holder: ${targetOwner})` : ''}`
+          : `Restored validity status for Token #${tokenId}${targetOwner ? ` (Holder: ${targetOwner})` : ''}`,
         wallet: account || CONTRACT_ADDRESS,
+        targetAddress: targetOwner,
+        recipient: targetOwner,
+        tokenId: tokenId,
         timestamp: new Date().toISOString(),
         blockNumber: 19827415 + auditLogs.length,
         txHash: txHash,
@@ -498,6 +858,11 @@ export default function App() {
 
   // 5. Grant Manager Role Action (Admin Only - Direct Role Assignment without designation field)
   const handleGrantManager = async (mgrAddress) => {
+    if (userRole !== 'admin') {
+      addToast('error', 'Unauthorized Action', 'Only the Root Administrator holding DEFAULT_ADMIN_ROLE can assign manager roles.');
+      return;
+    }
+
     try {
       setIsProcessing(true);
       setLoading(true);
@@ -546,6 +911,11 @@ export default function App() {
 
   // Revoke Manager Role Action (Admin Only)
   const handleRevokeManager = async (mgrAddress) => {
+    if (userRole !== 'admin') {
+      addToast('error', 'Unauthorized Action', 'Only the Root Administrator holding DEFAULT_ADMIN_ROLE can revoke manager roles.');
+      return;
+    }
+
     try {
       setIsProcessing(true);
       setLoading(true);
@@ -564,6 +934,13 @@ export default function App() {
       }
 
       setManagers(prev => prev.filter(m => (m.address || m).toLowerCase() !== mgrAddress.toLowerCase()));
+
+      // If the currently connected account had their manager role revoked, revert authority
+      if (account && account.toLowerCase() === mgrAddress.toLowerCase()) {
+        setUserRole('user');
+        setIsAdmin(false);
+        setIsManager(false);
+      }
 
       const newLog = {
         id: `LOG-00${auditLogs.length + 1}`,
@@ -595,21 +972,49 @@ export default function App() {
   // Standard users strictly see ONLY documents and assets explicitly minted to their own connected wallet address
   const visibleAssets = useMemo(() => {
     if (userRole === 'user') {
-      return assets.filter(a => a.owner && a.owner.toLowerCase() === account.toLowerCase());
+      if (!account) return [];
+      const userAddr = account.trim().toLowerCase();
+      return assets.filter(a => a.owner && a.owner.trim().toLowerCase() === userAddr);
     }
     return assets;
   }, [assets, userRole, account]);
 
-  // Standard users only see audit logs pertaining to their wallet
+  // Standard users strictly see ONLY audit logs directly associated with their wallet (zero global governance leakage)
   const visibleAuditLogs = useMemo(() => {
     if (userRole === 'user') {
-      return auditLogs.filter(log =>
-        (log.wallet && log.wallet.toLowerCase() === account.toLowerCase()) ||
-        (log.details && log.details.toLowerCase().includes(account.toLowerCase()))
+      if (!account) return [];
+      const userAddr = account.trim().toLowerCase();
+
+      // Collect all token IDs belonging to this user
+      const userTokenIds = new Set(
+        assets
+          .filter(a => a.owner && a.owner.trim().toLowerCase() === userAddr)
+          .map(a => a.tokenId.toString())
       );
+
+      return auditLogs.filter(log => {
+        // Strictly exclude system governance logs (e.g. manager role grants/revocations, protocol settings)
+        const isGovernanceLog = log.activity && (
+          log.activity.toLowerCase().includes('manager role') ||
+          log.activity.toLowerCase().includes('governance') ||
+          log.activity.toLowerCase().includes('admin')
+        );
+        if (isGovernanceLog) {
+          return false;
+        }
+
+        // Check if log is directly associated with user's wallet
+        const matchesTarget = log.targetAddress && log.targetAddress.trim().toLowerCase() === userAddr;
+        const matchesRecipient = log.recipient && log.recipient.trim().toLowerCase() === userAddr;
+        const matchesSigner = log.wallet && log.wallet.trim().toLowerCase() === userAddr;
+        const matchesDetails = log.details && log.details.toLowerCase().includes(userAddr);
+        const matchesTokenId = log.tokenId && userTokenIds.has(log.tokenId.toString());
+
+        return matchesTarget || matchesRecipient || matchesSigner || matchesDetails || matchesTokenId;
+      });
     }
     return auditLogs;
-  }, [auditLogs, userRole, account]);
+  }, [auditLogs, userRole, account, assets]);
 
   // 7. System Participants for Admin Contact List in Sidebar
   const uniqueUserAddresses = useMemo(() => {
@@ -622,6 +1027,24 @@ export default function App() {
     if (account) userSet.delete(account);
     return Array.from(userSet).filter(addr => !managerAddrs.has(addr.toLowerCase()));
   }, [assets, managers, account]);
+
+  // Effective managers roster ensuring connected wallet possessing MANAGER_ROLE is recognized dynamically
+  const effectiveManagers = useMemo(() => {
+    let list = Array.isArray(managers) ? [...managers] : [];
+    if (userRole === 'manager' && account) {
+      const normCurrent = account.toLowerCase();
+      const exists = list.some(m => (m.address || m).toLowerCase() === normCurrent);
+      if (!exists) {
+        list.unshift({
+          address: ethers.utils.isAddress(account) ? ethers.utils.getAddress(account) : account,
+          status: 'Active',
+          assignedDate: '2026-10-29T00:00:00.000Z',
+          name: 'Operational Manager (You)'
+        });
+      }
+    }
+    return list;
+  }, [managers, userRole, account]);
 
   // =========================================================================
   // 1. EXACT REFERENCE LANDING PAGE (Obsidian #000000, Glowing Lines, Zero Artifacts)
@@ -799,11 +1222,15 @@ export default function App() {
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-lg sm:text-xl font-extrabold text-white tracking-tight">
-                  {effectiveTab === 'dashboard' && (userRole === 'user' ? 'My DigiLocker Dashboard' : 'Enterprise Dashboard')}
+                  {effectiveTab === 'dashboard' && (
+                    userRole === 'user' ? 'My DigiLocker Dashboard' :
+                      userRole === 'manager' ? 'Operational Manager Dashboard' :
+                        'Master Admin Dashboard'
+                  )}
                   {effectiveTab === 'mint' && 'Digital Asset Minting'}
                   {effectiveTab === 'roles' && 'Role Governance & Access Control'}
                   {effectiveTab === 'directory' && 'System Participant Directory'}
-                  {effectiveTab === 'track-records' && 'Track Records & Audit Trail'}
+                  {effectiveTab === 'track-records' && (userRole === 'user' ? 'My Track Records' : 'Track Records & Audit Trail')}
                   {effectiveTab === 'settings' && 'Platform & Node Settings'}
                   {effectiveTab === '404' && 'Page Not Found'}
                 </h1>
@@ -814,7 +1241,11 @@ export default function App() {
               <p className="text-[11px] text-gray-400 hidden sm:block">
                 {effectiveTab === 'directory'
                   ? 'Enterprise Directory & Role Permissions Ledger'
-                  : 'Institutional Web3 Asset & Credential Infrastructure'}
+                  : userRole === 'user'
+                    ? 'Personal Cryptographic Credentials & DigiLocker Vault'
+                    : userRole === 'manager'
+                      ? 'Operational Asset Minting & Credential Revocation Core'
+                      : 'Institutional Web3 Governance & Enterprise Ledger Infrastructure'}
               </p>
             </div>
           </div>
@@ -883,6 +1314,52 @@ export default function App() {
                       indicatorColor="#06b6d4"
                     />
                   </>
+                ) : userRole === 'manager' ? (
+                  <>
+                    <GlowMetricCard
+                      title="Total Ledger Assets"
+                      value={`${assets.length} Assets`}
+                      subvalue={`${assets.filter(a => !a.isRevoked).length} Active • ${assets.filter(a => a.isRevoked).length} Revoked`}
+                      icon={FileCheck2}
+                      badgeText="Operational Scope"
+                      badgeType="info"
+                      trend="SHA-256 IPFS"
+                      indicatorColor="#818cf8"
+                    />
+
+                    <GlowMetricCard
+                      title="Operational Managers"
+                      value={`${effectiveManagers.length} Assigned`}
+                      subvalue="Authorized Minter & Revoker"
+                      icon={ShieldCheck}
+                      badgeText="Active Authority"
+                      badgeType="positive"
+                      trend="MANAGER_ROLE"
+                      indicatorColor="#06b6d4"
+                    />
+
+                    <GlowMetricCard
+                      title="Registered Recipients"
+                      value={`${uniqueUserAddresses.length} Accounts`}
+                      subvalue="Credential Holders"
+                      icon={Users}
+                      badgeText="Census Active"
+                      badgeType="positive"
+                      trend="Consensus Active"
+                      indicatorColor="#6366f1"
+                    />
+
+                    <GlowMetricCard
+                      title="System Health"
+                      value="100%"
+                      subvalue="Smart Contract Operational"
+                      icon={Activity}
+                      badgeText="Healthy Network"
+                      badgeType="positive"
+                      trend="EVM Verified"
+                      indicatorColor="#10b981"
+                    />
+                  </>
                 ) : (
                   <>
                     <GlowMetricCard
@@ -898,11 +1375,11 @@ export default function App() {
 
                     <GlowMetricCard
                       title="Total Managers"
-                      value={`${managers.length} Assigned`}
-                      subvalue={isManager ? "Authorized Authority" : "Read-Only Access"}
+                      value={`${effectiveManagers.length} Assigned`}
+                      subvalue="Institutional Delegations"
                       icon={ShieldCheck}
-                      badgeText={isManager ? "Active Authority" : "Restricted"}
-                      badgeType={isManager ? "positive" : "warning"}
+                      badgeText="Root Authority"
+                      badgeType="positive"
                       trend="AccessControl"
                       indicatorColor="#06b6d4"
                     />
@@ -910,7 +1387,7 @@ export default function App() {
                     <GlowMetricCard
                       title="Documents Uploaded"
                       value={`${assets.length} Assets`}
-                      subvalue={`${totalVerifiedAssets} Active • ${totalRevokedAssets} Revoked`}
+                      subvalue={`${assets.filter(a => !a.isRevoked).length} Active • ${assets.filter(a => a.isRevoked).length} Revoked`}
                       icon={FileCheck2}
                       badgeText="Immutable Ledger"
                       badgeType="info"
@@ -952,47 +1429,56 @@ export default function App() {
               onMintAsset={handleMintAsset}
               loading={loading}
               account={account}
+              userRole={userRole}
             />
           )}
 
           {/* TAB 3: ROLE MANAGEMENT (Admin Only) */}
           {effectiveTab === 'roles' && userRole === 'admin' && (
             <RoleManagementView
-              managers={managers}
+              managers={effectiveManagers}
               onGrantManager={handleGrantManager}
               onRevokeManager={handleRevokeManager}
               loading={loading}
+              userRole={userRole}
             />
           )}
 
-          {/* TAB: SYSTEM DIRECTORY (Dedicated Full-Screen Page) */}
-          {effectiveTab === 'directory' && (
+          {/* TAB: SYSTEM DIRECTORY (Admin & Manager Only) */}
+          {effectiveTab === 'directory' && canManage && (
             <SystemDirectoryView
-              adminAddress={userRole === 'admin' && account ? account : '0x71b2B54E8972D7a4b8682F81BceC6e7118334b7D'}
-              managers={managers}
+              adminAddress={userRole === 'admin' && account ? account : MASTER_ADMIN_ADDRESS}
+              managers={effectiveManagers}
               users={uniqueUserAddresses}
               assets={assets}
               auditLogs={auditLogs}
               currentAccount={account}
               userRole={userRole}
-              onNavigateToRoles={() => setActiveTab('roles')}
+              onNavigateToRoles={userRole === 'admin' ? () => setActiveTab('roles') : undefined}
               onNavigateToMint={() => setActiveTab('mint')}
             />
           )}
 
           {/* TAB 4: TRACK RECORDS & IMMUTABLE AUDIT TRAIL (IST TIMESTAMPS) */}
           {effectiveTab === 'track-records' && (
-            <AuditTrailView auditLogs={visibleAuditLogs} />
+            <AuditTrailView auditLogs={visibleAuditLogs} userRole={userRole} />
           )}
 
-          {/* TAB 5: SETTINGS (Admin Only) */}
-          {effectiveTab === 'settings' && userRole === 'admin' && (
+          {/* TAB 5: SETTINGS (Admin & Manager Access) */}
+          {effectiveTab === 'settings' && canManage && (
             <div className="space-y-6">
               <div className="rounded-2xl bg-gray-900/60 border border-gray-800 p-6 sm:p-8 backdrop-blur-xl">
-                <h2 className="text-xl font-bold text-white mb-2">Platform & Node Settings</h2>
-                <p className="text-xs text-gray-400 mb-6">
-                  Verify smart contract bindings, network parameters, and developer controls.
-                </p>
+                <div className="flex items-center justify-between pb-4 border-b border-gray-800 mb-6">
+                  <div>
+                    <h2 className="text-xl font-bold text-white mb-1">Platform & Node Settings</h2>
+                    <p className="text-xs text-gray-400">
+                      Verify smart contract bindings, network parameters, and developer controls.
+                    </p>
+                  </div>
+                  <span className="px-3 py-1 rounded-full text-xs font-mono font-bold bg-indigo-500/15 text-cyan-400 border border-indigo-500/30">
+                    {userRole === 'admin' ? 'Master Authority Node' : 'Operational Manager Node'}
+                  </span>
+                </div>
 
                 <div className="space-y-4 max-w-2xl text-xs">
                   <div className="p-4 rounded-xl bg-gray-950/70 border border-gray-800">
@@ -1023,6 +1509,16 @@ export default function App() {
                     <p className="text-gray-400 leading-relaxed">
                       Implemented with OpenZeppelin ERC-721 and AccessControl. Permissions strictly isolated on-chain via bytes32 cryptographic role hashes.
                     </p>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-gray-950/70 border border-gray-800 flex justify-between items-center">
+                    <div>
+                      <span className="block text-white font-bold">Connected Authority Scope</span>
+                      <span className="text-gray-400 capitalize">{userRole} Portal Privileges</span>
+                    </div>
+                    <span className="font-mono text-xs text-indigo-400 font-semibold">
+                      {userRole === 'admin' ? 'DEFAULT_ADMIN_ROLE' : 'MANAGER_ROLE'}
+                    </span>
                   </div>
                 </div>
               </div>

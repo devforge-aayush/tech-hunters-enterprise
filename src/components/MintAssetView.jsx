@@ -10,7 +10,8 @@ import DigitalIdCard from './DigitalIdCard';
 export default function MintAssetView({
   onMintAsset,
   loading = false,
-  account: _account = ''
+  account: _account = '',
+  userRole = 'admin'
 }) {
   // Clean blank form state with zero pre-filled junk data
   const [formData, setFormData] = useState({
@@ -46,6 +47,21 @@ export default function MintAssetView({
       avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
     }
   }), [formData]);
+
+  // Strict role isolation: Standard users cannot mint assets
+  if (userRole !== 'admin' && userRole !== 'manager') {
+    return (
+      <div className="py-20 text-center rounded-2xl bg-gray-900/60 border border-gray-800 p-8 backdrop-blur-xl">
+        <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center mx-auto mb-4 text-indigo-400">
+          <Lock className="w-7 h-7" />
+        </div>
+        <h2 className="text-xl font-bold text-white mb-2">Access Denied: Authorized Minter Authority Required</h2>
+        <p className="text-xs text-gray-400 max-w-md mx-auto leading-relaxed">
+          Asset minting and on-chain credential publishing are restricted to accounts holding Admin or Manager roles.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -91,7 +107,7 @@ export default function MintAssetView({
               </label>
               <input
                 type="text"
-                placeholder="0x71b2B54E8972D7a4b8682F81BceC6e7118334b7D"
+                placeholder="0xB7c3A398e8e9eD1Bd1aFC6832f02b1A11c2d4677"
                 value={formData.recipient}
                 onChange={(e) => setFormData({ ...formData, recipient: e.target.value.trim() })}
                 required

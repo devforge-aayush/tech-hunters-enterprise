@@ -16,10 +16,26 @@ export default function RoleManagementView({
   onGrantManager,
   onRevokeManager,
   loading = false,
-  statusMsg: _statusMsg = ""
+  statusMsg: _statusMsg = "",
+  userRole = 'admin'
 }) {
   const [addressInput, setAddressInput] = useState('');
   const [copiedAddress, setCopiedAddress] = useState(null);
+
+  // Strict role isolation: Only Master Administrator holding DEFAULT_ADMIN_ROLE can manage roles
+  if (userRole !== 'admin') {
+    return (
+      <div className="py-20 text-center rounded-2xl bg-gray-900/60 border border-gray-800 p-8 backdrop-blur-xl">
+        <div className="w-14 h-14 rounded-2xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center mx-auto mb-4 text-purple-400">
+          <Lock className="w-7 h-7" />
+        </div>
+        <h2 className="text-xl font-bold text-white mb-2">Access Denied: Root Administrator Required</h2>
+        <p className="text-xs text-gray-400 max-w-md mx-auto leading-relaxed">
+          Role governance, operational manager delegation, and contract privilege assignments are strictly reserved for the Master Administrator.
+        </p>
+      </div>
+    );
+  }
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -80,7 +96,7 @@ export default function RoleManagementView({
               </label>
               <input
                 type="text"
-                placeholder="0x71b2B54E8972D7a4b8682F81BceC6e7118334b7D"
+                placeholder="0xB7c3A398e8e9eD1Bd1aFC6832f02b1A11c2d4677"
                 value={addressInput}
                 onChange={(e) => setAddressInput(e.target.value.trim())}
                 required

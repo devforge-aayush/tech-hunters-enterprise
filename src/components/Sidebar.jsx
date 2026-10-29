@@ -25,18 +25,19 @@ export default function Sidebar({
 
   // Tab privileges:
   // Admin: Dashboard, Mint Asset, Role Governance, System Directory, Track Records, Settings
-  // Manager: Dashboard, Mint Asset, System Directory, Track Records
-  // User: Dashboard, System Directory, Track Records
+  // Manager: Dashboard, Mint Asset, System Directory, Track Records, Settings
+  // User: Dashboard, Track Records
   const allTabs = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'manager', 'user'] },
     { id: 'mint', label: 'Mint Asset', icon: PlusCircle, roles: ['admin', 'manager'] },
     { id: 'roles', label: 'Role Governance', icon: Shield, roles: ['admin'] },
-    { id: 'directory', label: 'System Directory', icon: ContactRound, roles: ['admin', 'manager', 'user'] },
+    { id: 'directory', label: 'System Directory', icon: ContactRound, roles: ['admin', 'manager'] },
     { id: 'track-records', label: 'Track Records', icon: History, roles: ['admin', 'manager', 'user'] },
-    { id: 'settings', label: 'System Settings', icon: Settings, roles: ['admin'] }
+    { id: 'settings', label: 'System Settings', icon: Settings, roles: ['admin', 'manager'] }
   ];
 
-  const visibleTabs = allTabs.filter(tab => tab.roles.includes(role));
+  const currentRole = (role || 'user').toLowerCase().trim();
+  const visibleTabs = allTabs.filter(tab => tab.roles.includes(currentRole));
   const isExpanded = isHovered || isPinned || mobileOpen;
 
   useEffect(() => {
@@ -201,7 +202,7 @@ export default function Sidebar({
             <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0" />
             <div className="flex flex-col min-w-0">
               <span className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Active Portal</span>
-              <span className="text-xs font-bold text-gray-200 capitalize truncate">{role} Authority</span>
+              <span className="text-xs font-bold text-gray-200 capitalize truncate">{currentRole} Authority</span>
             </div>
           </div>
         </div>

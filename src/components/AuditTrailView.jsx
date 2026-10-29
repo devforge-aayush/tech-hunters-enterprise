@@ -10,9 +10,11 @@ import {
 } from 'lucide-react';
 import { formatIST } from '../utils/dateUtils';
 
-export default function AuditTrailView({ auditLogs = [] }) {
+export default function AuditTrailView({ auditLogs = [], userRole = 'admin' }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedId, setCopiedId] = useState(null);
+
+  const isStandardUser = userRole === 'user';
 
   const handleCopy = (text, id) => {
     navigator.clipboard.writeText(text);
@@ -42,20 +44,22 @@ export default function AuditTrailView({ auditLogs = [] }) {
                 <History className="w-5 h-5" />
               </span>
               <span className="text-xs font-mono font-bold text-cyan-400 uppercase tracking-widest">
-                Ledger Provenance
+                {isStandardUser ? "Personal Ledger Provenance" : "Ledger Provenance"}
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-              Track Records & Immutable Audit Trail
+              {isStandardUser ? "My Track Records & Credential History" : "Track Records & Immutable Audit Trail"}
             </h1>
             <p className="text-xs sm:text-sm text-gray-400 mt-1 max-w-2xl">
-              Chronological cryptographic log of every governance action, role privilege assignment, asset issuance, and token revocation recorded on Ethereum. All timestamps verified in Indian Standard Time (IST).
+              {isStandardUser
+                ? "Chronological cryptographic log of verifiable credentials issued, updated, or verified for your connected wallet. All timestamps verified in Indian Standard Time (IST)."
+                : "Chronological cryptographic log of every governance action, role privilege assignment, asset issuance, and token revocation recorded on Ethereum. All timestamps verified in Indian Standard Time (IST)."}
             </p>
           </div>
 
           <div className="flex items-center gap-2 self-stretch sm:self-auto px-4 py-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
             <Lock className="w-4 h-4 text-emerald-400" />
-            Zero-Tampering Ledger
+            <span>{isStandardUser ? "Personal Ledger Enforced" : "Zero-Tampering Ledger"}</span>
           </div>
         </div>
       </div>
@@ -69,7 +73,7 @@ export default function AuditTrailView({ auditLogs = [] }) {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by wallet, activity, or transaction..."
+              placeholder={isStandardUser ? "Search your credential activities or transaction hashes..." : "Search by wallet, activity, or transaction..."}
               className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-500 text-xs focus:outline-none focus:border-indigo-500"
             />
           </div>
@@ -82,11 +86,15 @@ export default function AuditTrailView({ auditLogs = [] }) {
         {filteredLogs.length === 0 ? (
           <div className="py-16 text-center border border-dashed border-gray-800 rounded-2xl bg-gray-950/40 mt-5">
             <FileClock className="w-10 h-10 text-gray-600 mx-auto mb-3" />
-            <h3 className="text-sm font-bold text-gray-300">No Track Records Logged Yet</h3>
+            <h3 className="text-sm font-bold text-gray-300">
+              {isStandardUser ? "No Activity Records Found for Your Account" : "No Track Records Logged Yet"}
+            </h3>
             <p className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">
               {searchQuery
                 ? `No recorded events match "${searchQuery}". Clear your search query.`
-                : 'Blockchain activities, role assignments, and asset minting transactions will automatically record here upon execution.'}
+                : isStandardUser
+                ? "When credentials are minted, revoked, or updated for your connected wallet, verifiable transaction records will appear here."
+                : "Blockchain activities, role assignments, and asset minting transactions will automatically record here upon execution."}
             </p>
           </div>
         ) : (

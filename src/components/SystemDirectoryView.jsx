@@ -99,10 +99,30 @@ export default function SystemDirectoryView({
     );
   }, [adminAddress, categoryFilter, statusFilter, query]);
 
+  // Operational Managers Roster:
+  // If the connected wallet holds MANAGER_ROLE, dynamically ensure it is recognized in the directory
+  const effectiveManagers = useMemo(() => {
+    let list = Array.isArray(managers) ? [...managers] : [];
+    const normalizedRole = (userRole || '').toLowerCase().trim();
+    if (normalizedRole === 'manager' && currentAccount) {
+      const normCurrent = currentAccount.toLowerCase();
+      const exists = list.some(m => (m.address || m).toLowerCase() === normCurrent);
+      if (!exists) {
+        list.unshift({
+          address: currentAccount,
+          status: 'Active',
+          assignedDate: '2026-10-29T00:00:00.000Z',
+          name: 'Operational Manager (You)'
+        });
+      }
+    }
+    return list;
+  }, [managers, userRole, currentAccount]);
+
   // Managers matching
   const filteredManagers = useMemo(() => {
     if (categoryFilter !== 'all' && categoryFilter !== 'managers') return [];
-    return managers.filter(mgr => {
+    return effectiveManagers.filter(mgr => {
       const addr = (mgr.address || mgr).toLowerCase();
       const name = (mgr.name || '').toLowerCase();
       const isRevoked = Boolean(mgr.isRevoked || mgr.status === 'revoked');
@@ -117,7 +137,7 @@ export default function SystemDirectoryView({
         'operational manager authorized minter credential'.includes(query)
       );
     });
-  }, [managers, categoryFilter, statusFilter, query]);
+  }, [effectiveManagers, categoryFilter, statusFilter, query]);
 
   // Users matching
   const filteredUsers = useMemo(() => {
@@ -139,7 +159,7 @@ export default function SystemDirectoryView({
   }, [users, userAssetStats, categoryFilter, statusFilter, query]);
 
   // Counts
-  const totalCount = 1 + managers.length + users.length;
+  const totalCount = 1 + effectiveManagers.length + users.length;
   const filteredTotalCount = (adminMatches ? 1 : 0) + filteredManagers.length + filteredUsers.length;
 
   // Pagination slices
@@ -156,6 +176,21 @@ export default function SystemDirectoryView({
   }, [filteredUsers, usersPage]);
 
   const totalUserPages = Math.ceil(filteredUsers.length / itemsPerPage) || 1;
+
+  // Strict role isolation: Standard users must never access System Directory
+  if (userRole !== 'admin' && userRole !== 'manager') {
+    return (
+      <div className="py-20 text-center rounded-2xl bg-gray-900/60 border border-gray-800 p-8 backdrop-blur-xl">
+        <div className="w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center mx-auto mb-4 text-rose-400">
+          <ShieldAlert className="w-7 h-7" />
+        </div>
+        <h2 className="text-xl font-bold text-white mb-2">Access Denied: Administrative Authority Required</h2>
+        <p className="text-xs text-gray-400 max-w-md mx-auto leading-relaxed">
+          The System Directory contains institutional participant registries and access rosters. It is strictly restricted to accounts holding DEFAULT_ADMIN_ROLE or MANAGER_ROLE permissions.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -211,7 +246,7 @@ export default function SystemDirectoryView({
             <span className="text-xs font-medium text-cyan-300">Operational Managers</span>
             <ShieldCheck className="w-4 h-4 text-cyan-400" />
           </div>
-          <span className="text-2xl font-extrabold text-cyan-200">{managers.length} Assigned</span>
+          <span className="text-2xl font-extrabold text-cyan-200">{effectiveManagers.length} Assigned</span>
           <p className="text-[11px] text-cyan-400/70 mt-0.5">MANAGER_ROLE (Minter)</p>
         </div>
 
@@ -285,7 +320,7 @@ export default function SystemDirectoryView({
             {[
               { id: 'all', label: `All Participants (${totalCount})` },
               { id: 'admin', label: 'Master Admin (1)' },
-              { id: 'managers', label: `Operational Managers (${managers.length})` },
+              { id: 'managers', label: `Operational Managers (${effectiveManagers.length})` },
               { id: 'users', label: `Asset Holders (${users.length})` }
             ].map(chip => (
               <button
@@ -436,7 +471,7 @@ export default function SystemDirectoryView({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
             <h2 className="text-sm font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-cyan-400" />
-              Operational Managers ({filteredManagers.length} of {managers.length})
+              Operational Managers ({filteredManagers.length} of {effectiveManagers.length})
             </h2>
             <span className="text-xs font-mono text-cyan-400/80">Operational Authority · Asset Minting & Revocation</span>
           </div>
