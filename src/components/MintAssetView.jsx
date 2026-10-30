@@ -8,7 +8,10 @@ import {
   FileText,
   CheckCircle2,
   X,
-  AlertCircle
+  AlertCircle,
+  Maximize2,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react';
 import DigitalIdCard from './DigitalIdCard';
 import { uploadAssetPipeline } from '../services/ipfsService';
@@ -24,7 +27,8 @@ export default function MintAssetView({
     recipient: '',
     name: '',
     type: 'Identity Document',
-    department: ''
+    department: '',
+    expiryDate: ''
   });
 
   const [selectedFile, setSelectedFile] = useState(null);
@@ -34,6 +38,8 @@ export default function MintAssetView({
   const [pinnedMetadataUri, setPinnedMetadataUri] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [showImageModal, setShowImageModal] = useState(false);
+  const [modalZoom, setModalZoom] = useState(1);
   const fileInputRef = useRef(null);
 
   const handleFileSelect = (file) => {
@@ -111,7 +117,8 @@ export default function MintAssetView({
           name: formData.name.trim(),
           type: formData.type,
           department: formData.department.trim(),
-          recipient: formData.recipient.trim()
+          recipient: formData.recipient.trim(),
+          expiryDate: formData.expiryDate.trim() || 'Permanent'
         });
 
         metadataUri = pipelineResult.metadataUri;
@@ -120,15 +127,16 @@ export default function MintAssetView({
         setUploadStatus('IPFS pinning complete! Initiating blockchain transaction...');
       }
 
-      onMintAsset({
+      await onMintAsset({
         ...formData,
+        expiryDate: formData.expiryDate.trim() || 'Permanent',
         uri: metadataUri,
         gatewayUrl: gatewayUrl || filePreview,
         avatarUrl: filePreview
       });
     } catch (err) {
-      console.error('IPFS upload pipeline error:', err);
-      setErrorMsg(err.message || 'Failed to pin credential artifact to Pinata IPFS.');
+      console.error('IPFS upload / minting pipeline error:', err);
+      setErrorMsg(err.reason || err.message || 'Failed to complete transaction.');
     } finally {
       setIsUploadingIPFS(false);
     }
@@ -149,9 +157,11 @@ export default function MintAssetView({
       role: formData.type || 'Enterprise Asset',
       department: formData.department || 'Institutional Verification Core',
       clearanceLevel: 'Authorized',
-      expiryDate: '2030-12-31',
-      avatarUrl: filePreview || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
-    }
+      expiryDate: formData.expiryDate.trim() || 'Permanent',
+      avatarUrl: filePreview || ''
+    },
+    image: filePreview || '',
+    gatewayUrl: filePreview || ''
   }), [formData, selectedFile, filePreview, pinnedMetadataUri]);
 
   // Strict role isolation: Standard users cannot mint assets
@@ -313,11 +323,20 @@ export default function MintAssetView({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3.5 overflow-hidden">
                       {filePreview ? (
-                        <img
-                          src={filePreview}
-                          alt="Preview"
-                          className="w-12 h-12 rounded-xl object-cover border border-indigo-500/40 shrink-0"
-                        />
+                        <div 
+                          onClick={() => { setShowImageModal(true); setModalZoom(1); }}
+                          className="relative group cursor-pointer shrink-0"
+                          title="Click to expand & inspect uploaded artifact"
+                        >
+                          <img
+                            src={filePreview}
+                            alt="Preview"
+                            className="w-12 h-12 rounded-xl object-cover border border-indigo-500/40 group-hover:border-cyan-400 transition-all"
+                          />
+                          <div className="absolute inset-0 bg-black/40 rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                            <Maximize2 className="w-4 h-4 text-white" />
+                          </div>
+                        </div>
                       ) : (
                         <div className="w-12 h-12 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-cyan-400 flex items-center justify-center shrink-0">
                           <FileText className="w-6 h-6" />
@@ -361,19 +380,44 @@ export default function MintAssetView({
               )}
             </div>
 
-            {/* Department */}
-            <div>
-              <label className="block text-xs font-semibold text-gray-300 mb-1.5">
-                Department / Division
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. Decentralized Infrastructure & Security"
-                value={formData.department}
-                onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                disabled={isFormBusy}
-                className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50"
-              />
+            {/* Department & Dynamic Valid Thru Date */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Department / Division
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Decentralized Infrastructure"
+                  value={formData.department}
+                  onChange={(e) => setFormData({ ...formData, department: e.target.value })}
+                  disabled={isFormBusy}
+                  className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold text-gray-300">
+                    Valid Thru / Expiry Date
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setFormData(prev => ({ ...prev, expiryDate: prev.expiryDate === 'Permanent' ? '' : 'Permanent' }))}
+                    className="text-[10px] font-mono text-cyan-400 hover:text-cyan-300 cursor-pointer"
+                  >
+                    {formData.expiryDate === 'Permanent' ? 'Custom Date' : 'Set Permanent'}
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  placeholder="e.g. 2028-12-31 or leave blank for Permanent"
+                  value={formData.expiryDate}
+                  onChange={(e) => setFormData({ ...formData, expiryDate: e.target.value })}
+                  disabled={isFormBusy}
+                  className="w-full px-4 py-2.5 rounded-xl bg-gray-950/70 border border-gray-800 text-white placeholder-gray-600 text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+                />
+              </div>
             </div>
 
             {/* Realtime Upload / Error Feedback */}
@@ -437,6 +481,84 @@ export default function MintAssetView({
           </p>
         </div>
       </div>
+
+      {/* Expanded Document / Artifact Image Modal with Strict Responsive Constraints */}
+      {showImageModal && filePreview && (
+        <div
+          onClick={() => setShowImageModal(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 backdrop-blur-xl p-4 sm:p-6 animate-in fade-in duration-150"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-4xl max-h-[90vh] flex flex-col bg-gray-900/95 border border-gray-800 rounded-3xl p-5 shadow-2xl overflow-hidden"
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 mb-3 border-b border-gray-800/80">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-white uppercase tracking-wider">Credential Artifact Inspection:</span>
+                <span className="text-xs font-mono text-cyan-400 truncate max-w-xs">{selectedFile?.name}</span>
+              </div>
+
+              {/* Zoom & Close Toolbar */}
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-gray-950 border border-gray-800 text-gray-300">
+                  <button
+                    type="button"
+                    onClick={() => setModalZoom(prev => Math.max(0.5, Number((prev - 0.2).toFixed(1))))}
+                    className="p-1 rounded hover:text-white hover:bg-gray-800 transition-colors cursor-pointer"
+                    title="Zoom Out"
+                  >
+                    <ZoomOut className="w-3.5 h-3.5" />
+                  </button>
+                  <span className="text-xs font-mono text-cyan-400 px-1 min-w-[45px] text-center">
+                    {Math.round(modalZoom * 100)}%
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setModalZoom(prev => Math.min(2.5, Number((prev + 0.2).toFixed(1))))}
+                    className="p-1 rounded hover:text-white hover:bg-gray-800 transition-colors cursor-pointer"
+                    title="Zoom In"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowImageModal(false)}
+                  className="p-1.5 rounded-xl bg-rose-500/20 text-rose-300 hover:bg-rose-600 hover:text-white border border-rose-500/30 transition-all cursor-pointer"
+                  title="Close Preview"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Constrained Image Viewer Viewport */}
+            <div className="w-full flex-1 flex items-center justify-center overflow-auto min-h-0 p-4">
+              <div
+                style={{
+                  transform: `scale(${modalZoom})`,
+                  transformOrigin: 'center center'
+                }}
+                className="transition-transform duration-150 ease-out flex items-center justify-center max-w-full max-h-full"
+              >
+                <img
+                  src={filePreview}
+                  alt={selectedFile?.name || 'Uploaded document preview'}
+                  style={{
+                    maxWidth: '100%',
+                    height: 'auto',
+                    maxHeight: '72vh',
+                    objectFit: 'contain'
+                  }}
+                  className="rounded-2xl shadow-2xl border border-indigo-500/30 bg-black/60"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

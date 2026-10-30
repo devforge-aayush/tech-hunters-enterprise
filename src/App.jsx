@@ -7,8 +7,10 @@ import {
   MANAGER_ROLE,
   MASTER_ADMIN_ADDRESS,
   KNOWN_SEPOLIA_MANAGERS,
-  getSepoliaContract
+  getSepoliaContract,
+  extractRevertReason
 } from './constants/contract';
+import { resolveIPFSUrl, fetchIPFSMetadata } from './services/ipfsService';
 import { INITIAL_ASSETS, INITIAL_AUDIT_LOGS } from './constants/initialData';
 import SparklesCore from './components/SparklesCore';
 import WalletHeader from './components/WalletHeader';
@@ -270,6 +272,30 @@ export default function App() {
         try {
           const record = await currContract.getAssetRecord(id);
           const tId = id.toNumber ? id.toNumber() : Number(id);
+          const metadataUri = record[1];
+
+          let resolvedImageUrl = '';
+          let dynamicDept = 'Enterprise Verification Core';
+          let dynamicExpiry = 'Permanent';
+
+          if (metadataUri) {
+            try {
+              const meta = await fetchIPFSMetadata(metadataUri);
+              if (meta) {
+                const img = meta.image || meta.gatewayUrl || meta.document_uri;
+                if (img) resolvedImageUrl = resolveIPFSUrl(img);
+                if (meta.attributes && Array.isArray(meta.attributes)) {
+                  meta.attributes.forEach(attr => {
+                    if (attr.trait_type === 'Department') dynamicDept = attr.value;
+                    if (attr.trait_type === 'Valid Thru') dynamicExpiry = attr.value;
+                  });
+                }
+              }
+            } catch (metaErr) {
+              console.warn(`Note on fetching metadata for token #${tId}:`, metaErr);
+            }
+          }
+
           loadedAssets.push({
             tokenId: tId,
             name: record[0].name,
@@ -277,15 +303,17 @@ export default function App() {
             owner: record[0].currentOwner,
             issuedBy: record[0].issuedBy,
             createdAt: record[0].createdAt ? record[0].createdAt.toNumber() : Math.floor(Date.now() / 1000),
-            uri: record[1],
+            uri: metadataUri,
+            image: resolvedImageUrl,
+            gatewayUrl: resolvedImageUrl,
             isRevoked: record[0].isRevoked,
             details: {
               employeeId: `TH-EID-${tId}`,
               role: record[0].assetType,
-              department: "Enterprise Verification Core",
+              department: dynamicDept,
               clearanceLevel: "Authorized",
-              expiryDate: "2030-12-31",
-              avatarUrl: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80"
+              expiryDate: dynamicExpiry,
+              avatarUrl: resolvedImageUrl
             }
           });
         } catch (innerErr) {
@@ -715,76 +743,202 @@ export default function App() {
   const handleMintAsset = async (formData) => {
     if (userRole !== 'admin' && userRole !== 'manager') {
       addToast('error', 'Unauthorized Action', 'Only Admin and Manager roles are authorized to mint digital assets.');
-      return;
+      throw new Error('Unauthorized Action: Only Admin and Manager roles are authorized to mint digital assets.');
     }
+
+    if (!formData.recipient || !ethers.utils.isAddress(formData.recipient.trim())) {
+      addToast('error', 'Invalid Recipient', 'Please provide a valid Ethereum wallet address (0x...).');
+      throw new Error(`Invalid recipient address: "${formData.recipient}". Please specify a valid 42-character 0x Ethereum address.`);
+    }
+
+    const cleanRecipient = ethers.utils.getAddress(formData.recipient.trim());
+    if (cleanRecipient === ethers.constants.AddressZero) {
+      addToast('error', 'Invalid Recipient', 'Cannot mint digital asset to zero address (0x0).');
+      throw new Error('Cannot mint to zero address.');
+    }
+
+    if (!formData.uri || !formData.uri.trim()) {
+      addToast('error', 'Missing Metadata URI', 'Asset metadata URI is empty. Please upload and pin a credential document first.');
+      throw new Error('URI cannot be empty.');
+    }
+
+    const cleanUri = formData.uri.trim();
+    const cleanName = formData.name?.trim() || 'Institutional Credential';
+    const cleanType = formData.type || 'Identity Document';
+    const validThru = (formData.expiryDate && formData.expiryDate.trim()) ? formData.expiryDate.trim() : 'Permanent';
 
     try {
       setIsProcessing(true);
       setLoading(true);
-      addToast('pending', 'Minting Asset On-Chain', 'Please approve transaction in your Web3 wallet...');
 
-      let txHash = `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`;
-      const highestId = assets.reduce((max, a) => Math.max(max, Number(a.tokenId) || 0), 100);
-      const newId = highestId + 1;
+      if (typeof window === 'undefined' || !window.ethereum) {
+        throw new Error('No Web3 wallet browser extension detected. Please install and activate MetaMask.');
+      }
 
-      if (contract && signer) {
-        try {
-          const tx = await contract.mintAsset(
-            formData.recipient,
-            formData.uri,
-            formData.name,
-            formData.type
-          );
-          txHash = tx.hash;
-          await tx.wait();
-        } catch (contractErr) {
-          console.warn("Contract mint call fallback:", contractErr);
+      // Dynamically resolve provider, accounts, and signer to guarantee the wallet transaction popup appears
+      const activeProvider = new ethers.providers.Web3Provider(window.ethereum);
+      let connectedAccounts = await activeProvider.listAccounts();
+      if (!connectedAccounts || connectedAccounts.length === 0) {
+        connectedAccounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      }
+      if (!connectedAccounts || connectedAccounts.length === 0) {
+        throw new Error('No active Ethereum account connected. Please unlock and connect your Web3 wallet.');
+      }
+
+      const activeSigner = activeProvider.getSigner();
+      const activeSignerAddress = await activeSigner.getAddress();
+      const activeContract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, activeSigner);
+
+      // Verify on-chain role requirements: Solidity contract enforces onlyRole(MANAGER_ROLE)
+      const managerRoleBytes = await activeContract.MANAGER_ROLE().catch(() => MANAGER_ROLE);
+      const adminRoleBytes = await activeContract.DEFAULT_ADMIN_ROLE().catch(() => DEFAULT_ADMIN_ROLE);
+
+      const hasManagerRole = await activeContract.hasRole(managerRoleBytes, activeSignerAddress).catch(() => false);
+
+      if (!hasManagerRole) {
+        // Check if caller is Admin possessing DEFAULT_ADMIN_ROLE
+        const isRootAdmin = await activeContract.hasRole(adminRoleBytes, activeSignerAddress).catch(() => false);
+        if (isRootAdmin) {
+          addToast('pending', 'Activating Manager Role', 'Root Admin detected without on-chain MANAGER_ROLE. Granting MANAGER_ROLE to your wallet...');
+          const grantTx = await activeContract.grantManagerRole(activeSignerAddress);
+          addToast('pending', 'Role Activation Pending', 'Confirming MANAGER_ROLE transaction on Sepolia...');
+          await grantTx.wait(1);
+          addToast('success', 'Manager Privilege Activated', 'Your wallet is now authorized to mint on-chain. Resuming asset minting...');
+        } else {
+          throw new Error(`Your wallet (${activeSignerAddress.substring(0, 6)}...${activeSignerAddress.substring(38)}) lacks MANAGER_ROLE on-chain required to mint assets. Please request an Administrator to grant Manager privileges.`);
         }
       }
 
+      // Pre-flight static call simulation: catches any potential revert before opening MetaMask
+      try {
+        await activeContract.callStatic.mintAsset(
+          cleanRecipient,
+          cleanUri,
+          cleanName,
+          cleanType
+        );
+      } catch (simErr) {
+        console.error("Contract pre-flight simulation error:", simErr);
+        const revertReason = extractRevertReason(simErr);
+        throw new Error(`Pre-flight simulation check reverted: ${revertReason}`);
+      }
+
+      // Dynamic gas estimation with 25% safety margin to prevent Out-Of-Gas reversions
+      let txGasLimit = ethers.BigNumber.from(1600000);
+      try {
+        const estimatedGas = await activeContract.estimateGas.mintAsset(
+          cleanRecipient,
+          cleanUri,
+          cleanName,
+          cleanType
+        );
+        txGasLimit = estimatedGas.mul(125).div(100);
+      } catch (gasErr) {
+        console.warn("Could not estimate gas, using safe default 1,600,000:", gasErr);
+      }
+
+      // Prompt MetaMask wallet transaction popup
+      addToast('pending', 'Web3 Wallet Signature Required', 'Please confirm and sign the asset minting transaction in your MetaMask wallet...');
+      
+      const tx = await activeContract.mintAsset(
+        cleanRecipient,
+        cleanUri,
+        cleanName,
+        cleanType,
+        { gasLimit: txGasLimit }
+      );
+
+      // Transaction successfully broadcasted
+      addToast('pending', 'Transaction Broadcasted', `Transaction broadcasted to Ethereum Sepolia. Awaiting block confirmation (${tx.hash.substring(0, 10)}...)...`, tx.hash);
+
+      // Strictly wait for on-chain block confirmation before proceeding (No premature success!)
+      const receipt = await tx.wait(1);
+
+      if (receipt.status === 0) {
+        throw new Error('Transaction execution was reverted on-chain by the EVM. Please check contract permissions or gas limit.');
+      }
+
+      // Parse the confirmed minted Token ID from on-chain event logs
+      let mintedTokenId = null;
+      if (receipt.events && receipt.events.length > 0) {
+        const transferEvent = receipt.events.find(
+          e => e.event === 'Transfer' || 
+          (e.topics && e.topics[0] === ethers.utils.id("Transfer(address,address,uint256)"))
+        );
+        if (transferEvent && transferEvent.args && transferEvent.args.tokenId) {
+          mintedTokenId = transferEvent.args.tokenId.toNumber 
+            ? transferEvent.args.tokenId.toNumber() 
+            : Number(transferEvent.args.tokenId);
+        }
+      }
+
+      if (!mintedTokenId) {
+        const highestId = assets.reduce((max, a) => Math.max(max, Number(a.tokenId) || 0), 100);
+        mintedTokenId = highestId + 1;
+      }
+
+      const confirmedTxHash = receipt.transactionHash || tx.hash;
+
+      // Construct verified on-chain asset
       const newAsset = {
-        tokenId: newId,
-        name: formData.name,
-        assetType: formData.type,
-        owner: formData.recipient,
-        issuedBy: account || CONTRACT_ADDRESS,
+        tokenId: mintedTokenId,
+        name: cleanName,
+        assetType: cleanType,
+        owner: cleanRecipient,
+        issuedBy: activeSignerAddress || account || CONTRACT_ADDRESS,
         createdAt: Math.floor(Date.now() / 1000),
         isRevoked: false,
-        uri: formData.uri,
-        txHash: txHash,
+        uri: cleanUri,
+        txHash: confirmedTxHash,
+        image: formData.gatewayUrl || formData.avatarUrl || '',
+        gatewayUrl: formData.gatewayUrl || formData.avatarUrl || '',
         details: {
-          employeeId: `TH-EID-${newId * 19}`,
-          role: formData.type,
+          employeeId: `TH-EID-${mintedTokenId * 19}`,
+          role: cleanType,
           department: formData.department || 'Enterprise Verification Core',
           clearanceLevel: 'Authorized',
-          expiryDate: '2030-12-31',
-          avatarUrl: formData.avatarUrl || formData.gatewayUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
+          expiryDate: validThru,
+          avatarUrl: formData.gatewayUrl || formData.avatarUrl || ''
         }
       };
 
-      setAssets(prev => [newAsset, ...prev]);
+      setAssets(prev => [newAsset, ...prev.filter(a => Number(a.tokenId) !== Number(mintedTokenId))]);
 
-      // 8. Track Records & Indian Standard Time (IST) - Associated directly with recipient
+      // Record immutable audit log with verified block number and transaction hash
       const newLog = {
         id: `LOG-00${auditLogs.length + 1}`,
-        activity: `Asset Minted: ${formData.name}`,
-        details: `Issued Token #${newId} (${formData.type}) to ${formData.recipient}`,
-        wallet: account || CONTRACT_ADDRESS,
-        recipient: formData.recipient,
-        targetAddress: formData.recipient,
-        tokenId: newId,
+        activity: `Asset Minted: ${cleanName}`,
+        details: `Issued Token #${mintedTokenId} (${cleanType}) to ${cleanRecipient}`,
+        wallet: activeSignerAddress || account || CONTRACT_ADDRESS,
+        recipient: cleanRecipient,
+        targetAddress: cleanRecipient,
+        tokenId: mintedTokenId,
         timestamp: new Date().toISOString(),
-        blockNumber: 19827400 + auditLogs.length,
-        txHash: txHash,
+        blockNumber: receipt.blockNumber || (19827400 + auditLogs.length),
+        txHash: confirmedTxHash,
         status: "Immutable"
       };
       setAuditLogs(prev => [newLog, ...prev]);
 
-      addToast('success', 'Asset Successfully Minted!', `Token #${newId} is now verified on Ethereum.`, txHash);
+      // Success notification only triggered AFTER confirmed on-chain transaction
+      addToast('success', 'Asset Successfully Minted!', `Token #${mintedTokenId} is confirmed on Ethereum Sepolia.`, confirmedTxHash);
       setActiveTab('dashboard');
+
+      // Refresh contract assets in background
+      try {
+        await loadAllAssets(activeContract);
+      } catch (syncErr) {
+        console.warn("Background asset sync note:", syncErr);
+      }
     } catch (err) {
-      console.error("Mint error:", err);
-      addToast('error', 'Minting Failed', err.message || 'Transaction was rejected.');
+      // Log the exact error to the console for complete developer debugging
+      console.error("Web3 Wallet / Contract Minting Exception:", err);
+
+      const displayMessage = extractRevertReason(err);
+      const isUserRejected = displayMessage.includes('cancelled') || displayMessage.includes('rejected');
+
+      addToast('error', isUserRejected ? 'Signature Rejected' : 'Minting Reverted', displayMessage);
+      throw new Error(displayMessage);
     } finally {
       setIsProcessing(false);
       setLoading(false);

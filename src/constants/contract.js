@@ -16,7 +16,10 @@ export const CONTRACT_ABI = [
   "function MANAGER_ROLE() view returns (bytes32)",
   "function DEFAULT_ADMIN_ROLE() view returns (bytes32)",
   "event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender)",
-  "event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender)"
+  "event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender)",
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+  "error AccessControlUnauthorizedAccount(address account, bytes32 neededRole)",
+  "error AccessControlBadConfirmation()"
 ];
 
 // OpenZeppelin AccessControl cryptographic role identifiers
@@ -55,4 +58,65 @@ export function getSepoliaProvider() {
 export function getSepoliaContract(signerOrProvider) {
   const provider = signerOrProvider || getSepoliaProvider();
   return new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+}
+
+/**
+ * Extracts descriptive revert reason from Web3/Ethers error object
+ */
+export function extractRevertReason(err) {
+  if (!err) return "Unknown transaction error.";
+
+  // 1. User wallet rejection in MetaMask
+  if (
+    err.code === 4001 ||
+    err.code === 'ACTION_REJECTED' ||
+    (err.message && (
+      err.message.includes('user rejected') || 
+      err.message.includes('User denied') || 
+      err.message.includes('rejected transaction')
+    ))
+  ) {
+    return "Transaction was cancelled / rejected by the user in MetaMask.";
+  }
+
+  // 2. Decode custom error from raw revert data (e.g. AccessControlUnauthorizedAccount)
+  const revertData = err?.data || err?.error?.data || err?.error?.error?.data;
+  if (typeof revertData === 'string' && revertData.startsWith('0x')) {
+    try {
+      const iface = new ethers.utils.Interface(CONTRACT_ABI);
+      const parsed = iface.parseError(revertData);
+      if (parsed.name === 'AccessControlUnauthorizedAccount') {
+        const account = parsed.args.account;
+        return `Unauthorized: Wallet ${account.substring(0, 6)}...${account.substring(38)} lacks MANAGER_ROLE on-chain required to mint assets.`;
+      }
+      return `Smart contract reverted with error: ${parsed.name}`;
+    } catch {
+      // not in ABI
+    }
+  }
+
+  // 3. Known require revert strings
+  const fullErrorString = (err.reason || err.data?.message || err.error?.message || err.message || '').toString();
+  if (fullErrorString.includes('URI cannot be empty')) {
+    return "Contract Revert: Asset metadata URI cannot be empty.";
+  }
+  if (fullErrorString.includes('Cannot mint to zero address')) {
+    return "Contract Revert: Cannot mint to zero address (0x0).";
+  }
+  if (fullErrorString.includes('AccessControlUnauthorizedAccount') || fullErrorString.includes('0xe2517d3f')) {
+    return "Unauthorized: Caller lacks MANAGER_ROLE permissions required to mint assets.";
+  }
+  if (fullErrorString.includes('insufficient funds')) {
+    return "Insufficient Sepolia ETH in your wallet to cover transaction gas fees.";
+  }
+
+  // 4. Fallback to clean reason or message
+  if (err.reason) return err.reason;
+  if (err.data?.message) return err.data.message;
+  if (err.message) {
+    const cleanMsg = err.message.split('(action=')[0].split('[ See:')[0].trim();
+    return cleanMsg || err.message;
+  }
+
+  return "Smart contract execution reverted on-chain. Please verify parameters and permissions.";
 }

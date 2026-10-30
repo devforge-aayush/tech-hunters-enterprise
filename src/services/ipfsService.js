@@ -111,6 +111,7 @@ export async function uploadAssetPipeline(file, assetDetails) {
     attributes: [
       { trait_type: "Asset Type", value: assetDetails.type || "Identity Document" },
       { trait_type: "Department", value: assetDetails.department || "Enterprise Core" },
+      { trait_type: "Valid Thru", value: assetDetails.expiryDate || "Permanent" },
       { trait_type: "Recipient", value: assetDetails.recipient },
       { trait_type: "Issuance Timestamp", value: Math.floor(Date.now() / 1000) },
       { trait_type: "Verification Protocol", value: "Tech Hunters ERC-721" }
@@ -127,4 +128,76 @@ export async function uploadAssetPipeline(file, assetDetails) {
     documentGatewayUrl: fileResult.gatewayUrl,
     metadata
   };
+}
+
+/**
+ * 4. Convert any IPFS URI (ipfs://...) or CID into a browser-accessible HTTP gateway URL
+ * @param {string} uri - IPFS URI, CID, or standard HTTP URL
+ * @returns {string} Fully resolved HTTP gateway URL
+ */
+export function resolveIPFSUrl(uri) {
+  if (!uri || typeof uri !== 'string') return '';
+  const trimmed = uri.trim();
+  if (trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return trimmed;
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
+  
+  // Extract CID if prefixed with ipfs:// or ipfs/
+  const cidMatch = trimmed.replace(/^ipfs:\/\/(\/)?/, '').replace(/^ipfs\//, '').trim();
+  if (cidMatch) {
+    return `https://${PINATA_GATEWAY}/ipfs/${cidMatch}`;
+  }
+  return trimmed;
+}
+
+/**
+ * 5. Fetch and decode ERC-721 metadata JSON directly from IPFS
+ * @param {string} uri - IPFS URI of the metadata JSON
+ * @returns {Promise<{ name?: string, description?: string, image?: string, gatewayUrl?: string, attributes?: Array }|null>}
+ */
+export async function fetchIPFSMetadata(uri) {
+  if (!uri) return null;
+  const primaryUrl = resolveIPFSUrl(uri);
+  if (!primaryUrl) return null;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(primaryUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (res.ok) {
+      const data = await res.json();
+      // Ensure data.image is converted to an HTTP gateway URL if it is in ipfs:// format
+      if (data && data.image) {
+        data.gatewayUrl = resolveIPFSUrl(data.image);
+      }
+      return data;
+    }
+  } catch (err) {
+    console.warn("Primary IPFS gateway fetch note:", primaryUrl, err?.message);
+  }
+
+  // Resilient fallback to Cloudflare / Public IPFS gateway if custom gateway timed out
+  const cid = uri.replace(/^ipfs:\/\/(\/)?/, '').replace(/^ipfs\//, '').trim();
+  if (cid && !primaryUrl.includes('cloudflare-ipfs.com')) {
+    try {
+      const fallbackUrl = `https://cloudflare-ipfs.com/ipfs/${cid}`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(fallbackUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.image) {
+          data.gatewayUrl = resolveIPFSUrl(data.image);
+        }
+        return data;
+      }
+    } catch {
+      // Fallback failed
+    }
+  }
+
+  return null;
 }

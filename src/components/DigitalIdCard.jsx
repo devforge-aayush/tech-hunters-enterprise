@@ -1,18 +1,86 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Shield, CheckCircle2, AlertOctagon, Cpu, QrCode, Lock, Fingerprint } from 'lucide-react';
 import { CONTRACT_ADDRESS } from '../constants/contract';
+import { resolveIPFSUrl, fetchIPFSMetadata } from '../services/ipfsService';
 
 export default function DigitalIdCard({ asset, isFullscreen = false }) {
   if (!asset) return null;
 
   const isRevoked = asset.isRevoked;
-  const details = asset.details || {
-    employeeId: `TH-ASSET-${asset.tokenId}`,
-    role: asset.assetType,
-    department: "Enterprise Verification Core",
-    clearanceLevel: "Authorized",
-    expiryDate: "2030-12-31",
-    avatarUrl: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80"
+  const rawDetails = asset.details || {};
+
+  // Extract initial candidate if available (excluding any legacy unsplash URLs)
+  const initialImageCandidate = 
+    (asset.image && !asset.image.includes('unsplash') ? asset.image : null) ||
+    (asset.gatewayUrl && !asset.gatewayUrl.includes('unsplash') ? asset.gatewayUrl : null) ||
+    (asset.avatarUrl && !asset.avatarUrl.includes('unsplash') ? asset.avatarUrl : null) ||
+    (rawDetails.avatarUrl && !rawDetails.avatarUrl.includes('unsplash') ? rawDetails.avatarUrl : null) ||
+    (rawDetails.image && !rawDetails.image.includes('unsplash') ? rawDetails.image : null) ||
+    '';
+
+  const [imageUrl, setImageUrl] = useState(() => resolveIPFSUrl(initialImageCandidate));
+  const [hasImageError, setHasImageError] = useState(false);
+  const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
+  const [metadataDetails, setMetadataDetails] = useState({});
+
+  useEffect(() => {
+    let isMounted = true;
+    setHasImageError(false);
+
+    // 1. Direct candidate from props
+    const directCandidate = 
+      (asset.image && !asset.image.includes('unsplash') ? asset.image : null) ||
+      (asset.gatewayUrl && !asset.gatewayUrl.includes('unsplash') ? asset.gatewayUrl : null) ||
+      (asset.avatarUrl && !asset.avatarUrl.includes('unsplash') ? asset.avatarUrl : null) ||
+      (rawDetails.avatarUrl && !rawDetails.avatarUrl.includes('unsplash') ? rawDetails.avatarUrl : null) ||
+      (rawDetails.image && !rawDetails.image.includes('unsplash') ? rawDetails.image : null);
+
+    if (directCandidate) {
+      setImageUrl(resolveIPFSUrl(directCandidate));
+      return;
+    }
+
+    // 2. Dynamically fetch and decode actual uploaded asset image from IPFS metadata
+    if (asset.uri && (asset.uri.startsWith('ipfs://') || asset.uri.startsWith('http'))) {
+      setIsLoadingMetadata(true);
+      fetchIPFSMetadata(asset.uri)
+        .then(metadata => {
+          if (!isMounted || !metadata) return;
+
+          const ipfsImage = metadata.image || metadata.gatewayUrl || metadata.document_uri;
+          if (ipfsImage) {
+            setImageUrl(resolveIPFSUrl(ipfsImage));
+          }
+
+          if (metadata.attributes && Array.isArray(metadata.attributes)) {
+            const extra = {};
+            metadata.attributes.forEach(attr => {
+              if (attr.trait_type === 'Department') extra.department = attr.value;
+              if (attr.trait_type === 'Valid Thru') extra.expiryDate = attr.value;
+              if (attr.trait_type === 'Asset Type') extra.role = attr.value;
+            });
+            setMetadataDetails(extra);
+          }
+        })
+        .catch(err => {
+          console.warn("DigitalIdCard IPFS metadata resolution note:", err);
+        })
+        .finally(() => {
+          if (isMounted) setIsLoadingMetadata(false);
+        });
+    } else {
+      setImageUrl('');
+    }
+
+    return () => { isMounted = false; };
+  }, [asset.uri, asset.image, asset.gatewayUrl, asset.avatarUrl, rawDetails.avatarUrl, rawDetails.image]);
+
+  const details = {
+    employeeId: rawDetails.employeeId || `TH-ASSET-${asset.tokenId}`,
+    role: metadataDetails.role || rawDetails.role || asset.assetType,
+    department: metadataDetails.department || rawDetails.department || "Enterprise Verification Core",
+    clearanceLevel: rawDetails.clearanceLevel || "Authorized",
+    expiryDate: metadataDetails.expiryDate || rawDetails.expiryDate || asset.expiryDate || "Permanent"
   };
 
   return (
@@ -75,18 +143,33 @@ export default function DigitalIdCard({ asset, isFullscreen = false }) {
       {/* Card Body */}
       <div className="relative p-6">
         <div className="flex flex-col sm:flex-row gap-5 items-center sm:items-start">
-          {/* Avatar / Portrait with Holographic Border */}
+          {/* Avatar / Portrait with Holographic Border - Dynamically renders uploaded IPFS image */}
           <div className="relative shrink-0">
-            <div className="w-24 h-28 rounded-2xl overflow-hidden border-2 border-indigo-500/40 shadow-inner bg-gray-900">
-              <img
-                src={details.avatarUrl}
-                alt={asset.name}
-                className={`w-full h-full object-cover ${isRevoked ? 'grayscale contrast-125' : ''}`}
-                onError={(e) => {
-                  e.target.src = "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80";
-                }}
-              />
+            <div className="w-24 h-28 rounded-2xl overflow-hidden border-2 border-indigo-500/40 shadow-inner bg-gradient-to-b from-gray-900 to-gray-950 flex items-center justify-center relative">
+              {imageUrl && !hasImageError ? (
+                <img
+                  src={imageUrl}
+                  alt={asset.name}
+                  className={`w-full h-full object-cover transition-all duration-300 ${isRevoked ? 'grayscale contrast-125' : ''}`}
+                  onError={() => setHasImageError(true)}
+                />
+              ) : isLoadingMetadata ? (
+                <div className="flex flex-col items-center justify-center p-2 text-center">
+                  <div className="w-5 h-5 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin mb-1.5" />
+                  <span className="text-[9px] font-mono text-cyan-300">Resolving IPFS...</span>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center p-2 text-center text-indigo-300/80">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center mb-1 text-cyan-400 shadow-md">
+                    <Shield className="w-5 h-5" />
+                  </div>
+                  <span className="text-[9px] font-mono font-bold tracking-wider uppercase text-cyan-400/90 truncate max-w-[80px]">
+                    {asset.assetType || 'Pass'}
+                  </span>
+                </div>
+              )}
             </div>
+
             {/* Status Dot */}
             <div className="absolute -bottom-2 -right-1 px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 shadow-md"
               style={{
